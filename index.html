@@ -21,9 +21,9 @@
   </script>
 
   <meta property="og:type" content="website">
-<meta property="og:title" content="Cody">
+<meta property="og:title" content="0xZOne&#39;s Notes">
 <meta property="og:url" content="https://0xzone.github.io/index.html">
-<meta property="og:site_name" content="Cody">
+<meta property="og:site_name" content="0xZOne&#39;s Notes">
 <meta property="og:locale" content="en_US">
 <meta property="article:author" content="0xZOne">
 <meta name="twitter:card" content="summary">
@@ -41,7 +41,7 @@
   };
 </script>
 
-  <title>Cody</title>
+  <title>0xZOne's Notes</title>
   
 
 
@@ -92,10 +92,9 @@
 
     <a href="/" class="brand" rel="start">
       <span class="logo-line-before"><i></i></span>
-      <h1 class="site-title">Cody</h1>
+      <h1 class="site-title">0xZOne's Notes</h1>
       <span class="logo-line-after"><i></i></span>
     </a>
-      <p class="site-subtitle" itemprop="description">on the way</p>
   </div>
 
   <div class="site-nav-right">
@@ -157,7 +156,7 @@
     </span>
 
     <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
-      <meta itemprop="name" content="Cody">
+      <meta itemprop="name" content="0xZOne's Notes">
     </span>
       <header class="post-header">
         <h2 class="post-title" itemprop="name headline">
@@ -173,7 +172,7 @@
               <span class="post-meta-item-text">Posted on</span>
               
 
-              <time title="Created: 2025-11-09 20:20:20 / Modified: 20:02:55" itemprop="dateCreated datePublished" datetime="2025-11-09T20:20:20+08:00">2025-11-09</time>
+              <time title="Created: 2025-11-09 20:20:20 / Modified: 20:09:36" itemprop="dateCreated datePublished" datetime="2025-11-09T20:20:20+08:00">2025-11-09</time>
             </span>
             <span class="post-meta-item">
               <span class="post-meta-item-icon">
@@ -196,7 +195,7 @@
     <div class="post-body" itemprop="articleBody">
 
       
-          <h1 id="PDFium-线程安全架构改造：详细方案与技术路线图"><a href="#PDFium-线程安全架构改造：详细方案与技术路线图" class="headerlink" title="PDFium 线程安全架构改造：详细方案与技术路线图"></a>PDFium 线程安全架构改造：详细方案与技术路线图</h1><h2 id="1-目标“线程安全”模型的定义与范围"><a href="#1-目标“线程安全”模型的定义与范围" class="headerlink" title="1. 目标“线程安全”模型的定义与范围"></a>1. 目标“线程安全”模型的定义与范围</h2><p>将 PDFium 这样的重量级 C++ 库从非线程安全改造为线程安全，首要任务是精确定义“线程安全”的目标状态。一个不明确的目标将导致灾难性的架构妥协。</p>
+          <h2 id="1-目标“线程安全”模型的定义与范围"><a href="#1-目标“线程安全”模型的定义与范围" class="headerlink" title="1. 目标“线程安全”模型的定义与范围"></a>1. 目标“线程安全”模型的定义与范围</h2><p>将 PDFium 这样的重量级 C++ 库从非线程安全改造为线程安全，首要任务是精确定义“线程安全”的目标状态。一个不明确的目标将导致灾难性的架构妥协。</p>
 <h3 id="1-1-线程安全模型的权衡"><a href="#1-1-线程安全模型的权衡" class="headerlink" title="1.1. 线程安全模型的权衡"></a>1.1. 线程安全模型的权衡</h3><p>PDFium 的当前状态是在进程级别上非线程安全的。其全局初始化函数 <code>FPDF_InitLibrary()</code> [1] 及其管理的全局资源，使得任何并发调用都可能导致数据竞争 (Race Condition) [2]。</p>
 <p>在改造时，我们面临两种主要模型：</p>
 <ol>
@@ -610,7 +609,7 @@
     </span>
 
     <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
-      <meta itemprop="name" content="Cody">
+      <meta itemprop="name" content="0xZOne's Notes">
     </span>
       <header class="post-header">
         <h2 class="post-title" itemprop="name headline">
