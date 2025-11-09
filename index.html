@@ -148,6 +148,459 @@
   
   
   <article itemscope itemtype="http://schema.org/Article" class="post-block" lang="en">
+    <link itemprop="mainEntityOfPage" href="https://0xzone.github.io/2025/11/09/PDFium%20%E7%BA%BF%E7%A8%8B%E5%AE%89%E5%85%A8%E6%9E%B6%E6%9E%84%E6%94%B9%E9%80%A0%EF%BC%9A%E8%AF%A6%E7%BB%86%E6%96%B9%E6%A1%88%E4%B8%8E%E6%8A%80%E6%9C%AF%E8%B7%AF%E7%BA%BF%E5%9B%BE/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/avatar.gif">
+      <meta itemprop="name" content="0xZOne">
+      <meta itemprop="description" content="">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="Cody">
+    </span>
+      <header class="post-header">
+        <h2 class="post-title" itemprop="name headline">
+          
+            <a href="/2025/11/09/PDFium%20%E7%BA%BF%E7%A8%8B%E5%AE%89%E5%85%A8%E6%9E%B6%E6%9E%84%E6%94%B9%E9%80%A0%EF%BC%9A%E8%AF%A6%E7%BB%86%E6%96%B9%E6%A1%88%E4%B8%8E%E6%8A%80%E6%9C%AF%E8%B7%AF%E7%BA%BF%E5%9B%BE/" class="post-title-link" itemprop="url">PDFium 线程安全架构改造：详细方案与技术路线图</a>
+        </h2>
+
+        <div class="post-meta">
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="far fa-calendar"></i>
+              </span>
+              <span class="post-meta-item-text">Posted on</span>
+              
+
+              <time title="Created: 2025-11-09 20:20:20 / Modified: 20:02:55" itemprop="dateCreated datePublished" datetime="2025-11-09T20:20:20+08:00">2025-11-09</time>
+            </span>
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="far fa-folder"></i>
+              </span>
+              <span class="post-meta-item-text">In</span>
+                <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
+                  <a href="/categories/%E6%8A%80%E6%9C%AF%E5%88%86%E6%9E%90/" itemprop="url" rel="index"><span itemprop="name">技术分析</span></a>
+                </span>
+            </span>
+
+          
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+
+      
+          <h1 id="PDFium-线程安全架构改造：详细方案与技术路线图"><a href="#PDFium-线程安全架构改造：详细方案与技术路线图" class="headerlink" title="PDFium 线程安全架构改造：详细方案与技术路线图"></a>PDFium 线程安全架构改造：详细方案与技术路线图</h1><h2 id="1-目标“线程安全”模型的定义与范围"><a href="#1-目标“线程安全”模型的定义与范围" class="headerlink" title="1. 目标“线程安全”模型的定义与范围"></a>1. 目标“线程安全”模型的定义与范围</h2><p>将 PDFium 这样的重量级 C++ 库从非线程安全改造为线程安全，首要任务是精确定义“线程安全”的目标状态。一个不明确的目标将导致灾难性的架构妥协。</p>
+<h3 id="1-1-线程安全模型的权衡"><a href="#1-1-线程安全模型的权衡" class="headerlink" title="1.1. 线程安全模型的权衡"></a>1.1. 线程安全模型的权衡</h3><p>PDFium 的当前状态是在进程级别上非线程安全的。其全局初始化函数 <code>FPDF_InitLibrary()</code> [1] 及其管理的全局资源，使得任何并发调用都可能导致数据竞争 (Race Condition) [2]。</p>
+<p>在改造时，我们面临两种主要模型：</p>
+<ol>
+<li><strong>完全可重入 (Full Re-entrancy):</strong> 允许<em>多个线程</em>同时对<em>同一个</em> <code>FPDF_DOCUMENT</code> 实例执行操作。这要求在库的极深层实现极其复杂的细粒度锁定 [3, 4]，极易出错，且可能导致严重的锁竞争。</li>
+<li><strong>每实例线程安全 (Per-Instance Thread Safety):</strong> 这是我们推荐的目标模型。它保证，只要两个线程操作的是<em>不同</em>的 <code>FPDF_DOCUMENT</code> 实例，它们就是完全线程安全的。这是在社区讨论中被认为是可行且有价值的模型 [5]。</li>
+</ol>
+<h3 id="1-2-目标架构：每实例线程安全"><a href="#1-2-目标架构：每实例线程安全" class="headerlink" title="1.2. 目标架构：每实例线程安全"></a>1.2. 目标架构：每实例线程安全</h3><p>本方案定义的目标架构是**“每实例线程安全”**。</p>
+<p>具体而言，这意味着：</p>
+<ul>
+<li><strong>安全场景：</strong> 线程 A 处理 <code>document1.pdf</code>，线程 B <em>同时</em>处理 <code>document2.pdf</code>。即使它们共享某些全局资源（如字体缓存），这种并发操作也必须是安全的。</li>
+<li><strong>不安全场景：</strong> 线程 A 渲染 <code>document1.pdf</code> 的第 1 页，线程 B <em>同时</em>渲染 <code>document1.pdf</code> 的第 2 页。</li>
+</ul>
+<p>此模型为服务器端应用（例如，并行处理大量不同PDF的Web服务）提供了最大的可伸缩性和价值。</p>
+<h3 id="1-3-关键边界：文档内同步的客户端责任"><a href="#1-3-关键边界：文档内同步的客户端责任" class="headerlink" title="1.3. 关键边界：文档内同步的客户端责任"></a>1.3. 关键边界：文档内同步的客户端责任</h3><p>作为目标架构的必然推论，我们必须设定一个清晰的 API 契约：<strong>PDFium 库本身<em>不会</em>保护单个 <code>FPDF_DOCUMENT</code> 实例免受并发访问。</strong></p>
+<p>这意味着：</p>
+<ul>
+<li>我们<em>不会</em>在 <code>FPDF_DOCUMENT</code> [6] 级别添加一个粗粒度的互斥锁（Mutex）。</li>
+<li><strong>API 契约：</strong> API 的调用者（客户端）有<em>绝对责任</em>实现自己的锁定机制（例如 <code>std::mutex</code>），以确保任何<em>单个</em> <code>FPDF_DOCUMENT</code> 实例在任何时候都只被一个线程访问 [7, 8]。</li>
+</ul>
+<p>这种设计避免了在库内部实现有缺陷的锁（这无法防止客户端的 “check-then-act” 竞争），并将锁的粒度控制权完全交给最了解业务逻辑的客户端。</p>
+<h2 id="2-深度分析：解构-PDFium-的全局状态架构"><a href="#2-深度分析：解构-PDFium-的全局状态架构" class="headerlink" title="2. 深度分析：解构 PDFium 的全局状态架构"></a>2. 深度分析：解构 PDFium 的全局状态架构</h2><p>PDFium 线程不安全的根源在于其深度依赖的、贯穿整个代码库的全局状态和单例模式。</p>
+<h3 id="2-1-FPDF-InitLibrary-的全局初始化问题"><a href="#2-1-FPDF-InitLibrary-的全局初始化问题" class="headerlink" title="2.1. FPDF_InitLibrary 的全局初始化问题"></a>2.1. <code>FPDF_InitLibrary</code> 的全局初始化问题</h3><p>公共 API <code>FPDF_InitLibrary()</code> [1] 和 <code>FPDF_InitLibraryWithConfig()</code> [6] 建立了一个进程范围的全局状态。在多组件环境中，这立即导致了初始化冲突和数据竞争 [2]。社区中提出的使用 <code>std::call_once</code> [2] 只是对症状的缓解，而非对根本架构缺陷的修复。</p>
+<h3 id="2-2-核心病灶：非线程安全的单例模式-CFX-GEModule"><a href="#2-2-核心病灶：非线程安全的单例模式-CFX-GEModule" class="headerlink" title="2.2. 核心病灶：非线程安全的单例模式 (CFX_GEModule)"></a>2.2. 核心病灶：非线程安全的单例模式 (<code>CFX_GEModule</code>)</h3><p>对代码库的深入分析 [9] 揭示了全局状态的真正来源：<code>CFX_GEModule</code> 类。</p>
+<ol>
+<li><strong>全局裸指针：</strong> 在 <code>core/fxge/cfx_gemodule.cpp</code> 中定义了一个全局裸指针 <code>CFX_GEModule* g_pGEModule = nullptr;</code> [9]。</li>
+<li><strong>非原子创建：</strong> <code>CFX_GEModule::Create(...)</code>（由 <code>FPDF_InitLibrary</code> 调用）直接对这个全局指针进行赋值：<code>g_pGEModule = new CFX_GEModule(...)</code> [9]。</li>
+<li><strong>全局访问：</strong> 代码库中任何地方都可以通过静态方法 <code>CFX_GEModule::Get()</code> [9] 来获取这个全局单例。</li>
+</ol>
+<p>这是典型的数据竞争：</p>
+<ul>
+<li>两个线程同时调用 <code>Create()</code> 会导致内存泄漏或双重初始化。</li>
+<li>一个线程调用 <code>Get()</code> 而另一个线程正在调用 <code>Destroy()</code>，会导致“悬空指针”(use-after-free) 或空指针解引用。</li>
+</ul>
+<p>更糟糕的是，这个全局 <code>CFX_GEModule</code> 实例 [10] 拥有其他关键的共享资源，特别是 <code>m_pFontCache</code>（字体缓存）[10]，从而将全局污染扩散到整个字体和图形引擎 (FXGE) 层。</p>
+<h3 id="2-3-识别其他全局与静态风险点"><a href="#2-3-识别其他全局与静态风险点" class="headerlink" title="2.3. 识别其他全局与静态风险点"></a>2.3. 识别其他全局与静态风险点</h3><p>除了 <code>CFX_GEModule</code>，还存在其他全局和静态变量，它们都是潜在的数据竞争来源：</p>
+<ul>
+<li><strong><code>CPDF_ModuleMgr</code>:</strong> 如社区所指出 [11]，这是一个必须被重构的全局管理器。其身影出现在多个模块中 [12]。</li>
+<li><strong>缓存对象：</strong> 诸如 <code>CPDF_PageImageCache</code> [13, 14, 15] 和 <code>CPDF_DocPageData</code> [14, 15, 16] 这样的缓存。幸运的是，分析显示它们目前被 <code>CPDF_Document</code> 所拥有 [17]。这在我们的新 API 契约（1.3节）下是安全的——只要客户端锁定了文档，这些缓存就是安全的。</li>
+<li><strong>遗留代码：</strong> PDFium 拥有悠久历史的遗留代码 [17]，很可能存在 C++11 之前的“魔术静态变量”(magic statics) [18]。这种变量的初始化在多线程环境中不是原子的，可能导致全局锁竞争或竞争条件。</li>
+</ul>
+<h3 id="2-4-全局状态与单例分析"><a href="#2-4-全局状态与单例分析" class="headerlink" title="2.4. 全局状态与单例分析"></a>2.4. 全局状态与单例分析</h3><p>为了量化重构工作，下表识别了关键的全局状态问题点及其拟议的解决方案。</p>
+<p><strong>表 1：全局状态与单例分析</strong></p>
+<table>
+<thead>
+<tr>
+<th>类 &#x2F; 变量</th>
+<th>位置 (示例)</th>
+<th>当前目的</th>
+<th>线程安全问题</th>
+<th>拟议重构 (见第 3 节)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>g_pGEModule</code></td>
+<td><code>core/fxge/cfx_gemodule.cpp</code> [9]</td>
+<td><code>CFX_GEModule</code> 的全局单例指针。</td>
+<td>经典的全局指针数据竞争。</td>
+<td>彻底废除。</td>
+</tr>
+<tr>
+<td><code>CFX_GEModule</code></td>
+<td><code>core/fxge/cfx_gemodule.h</code> [10]</td>
+<td>拥有平台和字体系统的单例。</td>
+<td>通过 <code>Get()</code> [9] 全局访问。</td>
+<td>重构为普通类。实例将由 <code>FPDF_CONTEXT</code> 拥有。</td>
+</tr>
+<tr>
+<td><code>m_pFontCache</code></td>
+<td><code>core/fxge/cfx_gemodule.h</code> [10]</td>
+<td>由 <code>CFX_GEModule</code> 拥有，用于缓存字体。</td>
+<td>通过 <code>g_pGEModule</code> 全局共享。其内部的 <code>map</code> 不是线程安全的。</td>
+<td>将由上下文拥有的 <code>CFX_GEModule</code> 实例拥有。<strong>必须</strong>为其添加内部 <code>base::Lock</code> 以保护其 <code>map</code>。</td>
+</tr>
+<tr>
+<td><code>CPDF_ModuleMgr</code></td>
+<td><code>core/fpdfapi/cpdf_modulemgr.h</code> [11, 12]</td>
+<td>管理 PDF API 的全局模块。</td>
+<td>假定为全局单例模式。</td>
+<td>必须重构为由 <code>FPDF_CONTEXT</code> 拥有。</td>
+</tr>
+<tr>
+<td><code>CPDF_PageImageCache</code></td>
+<td><code>core/fpdfapi/page/cpdf_pageimagecache.h</code> [13, 15]</td>
+<td>由 <code>CPDF_Document</code> 拥有，用于缓存页面图像。</td>
+<td>当前的每文档设计是可接受的。</td>
+<td>保持由 <code>CPDF_Document</code> 拥有。我们的 API 契约 (1.3 节) 保证其安全。</td>
+</tr>
+</tbody></table>
+<h2 id="3-核心架构解决方案：”上下文对象”-Context-Object-模式"><a href="#3-核心架构解决方案：”上下文对象”-Context-Object-模式" class="headerlink" title="3. 核心架构解决方案：”上下文对象” (Context Object) 模式"></a>3. 核心架构解决方案：”上下文对象” (Context Object) 模式</h2><p>要消除全局状态，我们必须引入一种新的机制来承载这些状态。</p>
+<h3 id="3-1-方案评估：为何-thread-local-不足取"><a href="#3-1-方案评估：为何-thread-local-不足取" class="headerlink" title="3.1. 方案评估：为何 thread_local 不足取"></a>3.1. 方案评估：为何 <code>thread_local</code> 不足取</h3><p>一个看似简单的解决方案是使用 <code>thread_local</code> [11, 19] 来存储原先的全局变量。这是一个技术陷阱，原因如下：</p>
+<ol>
+<li><strong>生命周期噩梦：</strong> 在现代线程池架构中，线程会被复用。<code>thread_local</code> 对象的生命周期与线程绑定，而不是与任务绑定。这会导致状态在一个不相关的任务中“泄漏”，引发灾难性故障。</li>
+<li><strong>资源浪费：</strong> 每个线程都将创建并拥有<em>自己</em>的全套 <code>CFX_GEModule</code> 和 <code>CFX_FontCache</code> [10]。在一个拥有 128 个线程的服务器上，这将产生 128 个完全独立、不共享的字体缓存，造成巨大的内存浪费和性能下降（缓存命中率暴跌）。</li>
+<li><strong>API 复杂性：</strong> API 契约会变得混乱。客户端是否需要在每个线程上都调用 <code>FPDF_InitLibrary()</code>？这是反直觉且容易出错的。</li>
+</ol>
+<h3 id="3-2-提案：FPDF-CONTEXT-作为核心状态载体"><a href="#3-2-提案：FPDF-CONTEXT-作为核心状态载体" class="headerlink" title="3.2. 提案：FPDF_CONTEXT 作为核心状态载体"></a>3.2. 提案：<code>FPDF_CONTEXT</code> 作为核心状态载体</h3><p>我们选择的解决方案是“上下文对象” (Context Object) 模式，这是在 C&#x2F;C++ 库设计中用于实现线程安全的黄金标准 [20, 21, 22]。</p>
+<ol>
+<li><strong>定义新句柄：</strong> 我们将定义一个新的、公开的、不透明的 C API 句柄：<code>FPDF_CONTEXT</code>。</li>
+<li><strong>客户端所有权：</strong> API 的调用者（客户端）将负责创建、拥有和销毁这个 <code>FPDF_CONTEXT</code> 实例。</li>
+<li><strong>状态隔离：</strong> <code>FPDF_CONTEXT</code> 实例将<em>拥有</em>所有先前是全局的或 <code>thread_local</code> 的状态。</li>
+</ol>
+<p>这种模式赋予客户端完全的控制权：</p>
+<ul>
+<li><strong>每线程一个上下文：</strong> 客户端可以为每个线程创建一个 <code>FPDF_CONTEXT</code>。</li>
+<li><strong>应用程序共享一个上下文：</strong> 客户端可以创建<em>一个</em> <code>FPDF_CONTEXT</code> 并在所有线程中共享（由客户端自己的锁保护）。</li>
+<li><strong>每会话一个上下文：</strong> 客户端可以为每个用户会话创建一个 <code>FPDF_CONTEXT</code>。</li>
+</ul>
+<p>这是最灵活、最健壮的架构。</p>
+<h3 id="3-3-所有权与数据流重构"><a href="#3-3-所有权与数据流重构" class="headerlink" title="3.3. 所有权与数据流重构"></a>3.3. 所有权与数据流重构</h3><p><code>FPDF_CONTEXT</code> 的 C++ 内部实现（例如 <code>PDFiumContext</code> 类）将是重构的核心：</p>
+<ol>
+<li><p><strong><code>CFX_GEModule</code> 的新家：</strong> <code>PDFiumContext</code> 类将包含一个 <code>std::unique_ptr&lt;CFX_GEModule&gt;</code> 成员。<code>CFX_GEModule</code> 将被重构为一个普通类，其 <code>Get()</code> &#x2F; <code>Create()</code> &#x2F; <code>g_pGEModule</code> [9] 将被完全删除。</p>
+</li>
+<li><p><strong><code>CPDF_Document</code> 的关联：</strong> <code>CPDF_Document</code> [23] 将被修改，增加一个 <code>UnownedPtr&lt;PDFiumContext&gt;</code> 成员。当客户端调用新的 <code>FPDF_LoadDocumentWithContext</code> 函数时，该文档实例将存储指向创建它的上下文的指针。</p>
+</li>
+<li><p><strong>缓存的所有权：</strong></p>
+<ul>
+<li><code>CFX_FontCache</code> [10]：它仍被 <code>CFX_GEModule</code> 拥有，而 <code>CFX_GEModule</code> 现在被 <code>PDFiumContext</code> 拥有。<strong>这是关键点：</strong> 为了允许客户端安全地在线程间<em>共享</em>一个 <code>FPDF_CONTEXT</code>（我们测试计划中的场景 2），<code>CFX_FontCache</code> <em>本身必须被改造为内部线程安全</em>。它必须使用一个（例如 Chromium 的 <code>base::Lock</code> [24]）来保护其内部的 <code>std::map</code>，使其 <code>GetFont()</code> 和 <code>SetFont()</code> 操作是原子的。这是在唯一需要的地方（共享资源）应用细粒度锁定 [3] 的典范。</li>
+<li><code>CPDF_PageImageCache</code> [15]：它保持其在 <code>CPDF_Document</code> 内的所有权 [14, 17]。根据我们的 API 契约（1.3节），这是安全的。</li>
+</ul>
+</li>
+<li><p><strong>新的数据访问链：</strong> 这种设计建立了一个清晰的、自下而上的数据访问链。例如，当渲染 <code>FPDF_PAGE</code> [25] 需要访问字体时：</p>
+<ol>
+<li><code>FPDF_PAGE</code> 句柄 -&gt; <code>CPDF_Page</code> 实例</li>
+<li><code>CPDF_Page::GetDocument()</code> [25] -&gt; <code>CPDF_Document*</code></li>
+<li><code>CPDF_Document::GetContext()</code> (新方法) -&gt; <code>PDFiumContext*</code></li>
+<li><code>PDFiumContext::GetGEModule()</code> (新方法) -&gt; <code>CFX_GEModule*</code></li>
+<li><code>CFX_GEModule::GetFontCache()</code> [10] -&gt; <code>CFX_FontCache*</code></li>
+<li><code>CFX_FontCache::GetFont(...)</code> (此函数内部使用 <code>base::AutoLock</code> [24] 来安全地访问其 <code>map</code>)</li>
+</ol>
+</li>
+</ol>
+<p>这个设计 [20, 22] 完美地实现了我们的目标：线程 A（处理文档 1）和线程 B（处理文档 2）共享同一个 <code>FPDF_CONTEXT</code>，它们可以<em>并行</em>地执行解析和渲染，只有在它们<em>同时</em>访问 <code>CFX_FontCache</code> 的 <code>map</code> 时，才会被 <code>base::Lock</code> 短暂地串行化。</p>
+<h2 id="4-第三方依赖库的线程安全审计与修复"><a href="#4-第三方依赖库的线程安全审计与修复" class="headerlink" title="4. 第三方依赖库的线程安全审计与修复"></a>4. 第三方依赖库的线程安全审计与修复</h2><p>我们的“上下文对象”架构是健壮的，但它依赖于一个关键假设：我们的第三方依赖库是可控的。我们不能在不安全的依赖库之上构建安全的系统 [5, 11]。</p>
+<h3 id="4-1-审计框架"><a href="#4-1-审计框架" class="headerlink" title="4.1. 审计框架"></a>4.1. 审计框架</h3><p>我们必须审计 PDFium 使用的所有第三方库 [26]。我们的 <code>FPDF_CONTEXT</code> 是管理那些需要每线程句柄或上下文指针的 C 库的完美工具。</p>
+<h3 id="4-2-审计结果与修复计划"><a href="#4-2-审计结果与修复计划" class="headerlink" title="4.2. 审计结果与修复计划"></a>4.2. 审计结果与修复计划</h3><ul>
+<li><p><strong>安全库：</strong> FreeType (<code>fx_freetype</code>), libpng (<code>fx_lpng</code>), zlib (<code>fx_zlib</code>) 均被报告为线程安全 [11]。ICU 在其设计上对我们的使用模型（不同对象）是安全的 [11]。这些库不需要修改。</p>
+</li>
+<li><p><strong>lcms2 (<code>fx_lcms2</code>):</strong></p>
+<ul>
+<li><strong>问题：</strong> 全局非线程安全。PDFium 自己的源码树中包含的 <code>lcms2.h</code> [27] 显示了 <code>cmsCreateContext()</code> API。文档 [28, 29] 证实，线程安全<em>要求</em>使用 <code>ThreadContext</code>。</li>
+<li><strong>修复方案：</strong> <code>PDFiumContext</code> 类（<code>FPDF_CONTEXT</code> 的实现）将在其构造函数中调用 <code>cmsCreateContext()</code>，并存储返回的 <code>cmsContext</code> 句柄。所有对 lcms2 的内部调用都必须被重构，以使用需要此 <code>cmsContext</code> 句柄的函数变体。</li>
+</ul>
+</li>
+<li><p><strong>libjpeg-turbo (<code>jpeg</code>):</strong></p>
+<ul>
+<li><strong>问题：</strong> 库本身在每个 <code>tjhandle</code> 上是线程安全的 [30]。<strong>但关键问题是</strong>：其全局错误处理函数 <code>tjGetErrorStr()</code> 使用一个<em>静态缓冲区</em>，因此它<em>不是</em>线程安全的 [30, 31, 32]。</li>
+<li><strong>修复方案：</strong> 我们不能修复 libjpeg-turbo。相反，我们将在 PDFium 内部实现一个包装器，该包装器拥有一个 <code>static base::Lock</code>。任何调用 libjpeg-turbo 函数并需要通过 <code>tjGetErrorStr()</code> 获取错误信息的 PDFium 代码，都<em>必须</em>通过这个包装器，该包装器在 <code>base::AutoLock</code> 的保护下调用 <code>tjGetErrorStr()</code>。这是一个仅在错误路径上发生的、可接受的性能瓶颈。</li>
+</ul>
+</li>
+<li><p><strong>openjpeg (<code>fx_libopenjpeg</code>):</strong></p>
+<ul>
+<li><strong>问题：</strong> 这是<em>最高风险</em>的依赖项。该库“并非真正的线程安全” [33]。它是“在没有考虑线程安全的情况下设计的” [33]，并使用了全局变量。</li>
+<li><strong>修复方案：</strong> 我们无法控制此库 [5]。维护一个 openjpeg 的“fork”在工程上是不可持续的。唯一<em>安全</em>的解决方案是假定该库 100% 是单线程的。我们将创建一个<em>进程级的静态 <code>base::Lock</code></em>（例如 <code>g_openjpeg_mutex</code>），并用它来<em>串行化对 openjpeg 库的所有调用</em>（包括编码和解码）。</li>
+<li><strong>性能影响：</strong> 这将导致在<em>并发处理 JPEG2000 图像</em>时出现严重的性能瓶颈。这是为了在不修改 openjpeg 的情况下获得<em>正确性</em>而必须付出的代价。此决策必须在文档中明确声明。</li>
+</ul>
+</li>
+</ul>
+<h3 id="4-3-第三方依赖库线程安全审计"><a href="#4-3-第三方依赖库线程安全审计" class="headerlink" title="4.3. 第三方依赖库线程安全审计"></a>4.3. 第三方依赖库线程安全审计</h3><p><strong>表 2：第三方依赖库线程安全审计与修复计划</strong></p>
+<table>
+<thead>
+<tr>
+<th>库</th>
+<th>报告的线程安全性</th>
+<th>识别的问题</th>
+<th>修复计划</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>FreeType</td>
+<td>是 [11]</td>
+<td>无</td>
+<td>无需操作。</td>
+</tr>
+<tr>
+<td>ICU</td>
+<td>是（有条件）[11]</td>
+<td>对我们的模型安全。</td>
+<td>无需操作。</td>
+</tr>
+<tr>
+<td>lcms2</td>
+<td>否（全局）[27]</td>
+<td>线程安全需要 <code>cmsContext</code> [28]。</td>
+<td><code>FPDF_CONTEXT</code> 将拥有一个 <code>cmsContext</code> 实例，并将其传递给所有 lcms2 调用。</td>
+</tr>
+<tr>
+<td>libjpeg-turbo</td>
+<td>部分 [30]</td>
+<td><code>tjGetErrorStr()</code> 使用全局静态缓冲区 [31]。</td>
+<td>仅对错误处理调用使用<em>全局静态 <code>base::Lock</code></em>。</td>
+</tr>
+<tr>
+<td>openjpeg</td>
+<td>否 [33]</td>
+<td>根本上非线程安全；使用全局变量。</td>
+<td>对<em>所有</em> openjpeg 调用使用<em>全局静态 <code>base::Lock</code></em>。串行化所有 JPEG2000 处理。</td>
+</tr>
+<tr>
+<td>libpng, zlib</td>
+<td>是 [11]</td>
+<td>无</td>
+<td>无需操作。</td>
+</tr>
+</tbody></table>
+<h2 id="5-内部并发：锁策略的演进"><a href="#5-内部并发：锁策略的演进" class="headerlink" title="5. 内部并发：锁策略的演进"></a>5. 内部并发：锁策略的演进</h2><p>基于上述分析，我们最终的锁策略是一个清晰的两层模型。</p>
+<h3 id="5-1-锁模型澄清：上下文-vs-文档"><a href="#5-1-锁模型澄清：上下文-vs-文档" class="headerlink" title="5.1. 锁模型澄清：上下文 vs. 文档"></a>5.1. 锁模型澄清：上下文 vs. 文档</h3><ol>
+<li><p><strong>上下文级别（共享资源）：</strong><br>由 <code>FPDF_CONTEXT</code> 拥有且<em>设计为</em>在多个文档之间共享的资源（唯一的例子是 <code>CFX_FontCache</code> [10]），<em>必须</em>是内部线程安全的。它们将使用自己的细粒度 <code>base::Lock</code> [24] 来保护其内部状态（例如 <code>std::map</code>）。这允许了高并发性 [3, 34]。</p>
+</li>
+<li><p><strong>文档级别（独占资源）：</strong><br><code>FPDF_DOCUMENT</code> [6]、<code>FPDF_PAGE</code> [35] 及其拥有的所有数据（例如 <code>CPDF_PageImageCache</code> [15]）被<em>明确定义为非线程安全</em>。</p>
+</li>
+</ol>
+<h3 id="5-2-客户端锁的必要性"><a href="#5-2-客户端锁的必要性" class="headerlink" title="5.2. 客户端锁的必要性"></a>5.2. 客户端锁的必要性</h3><p>在 1.3 节中，我们规定客户端必须锁定文档。这里是技术上的理由：</p>
+<ul>
+<li><p><strong>避免 API 陷阱：</strong> 假设我们试图“帮助”客户端，并在 <code>FPDF_GetPageCount</code> 和 <code>FPDF_LoadPage</code> 内部都添加了锁。客户端代码如下：</p>
+<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="type">int</span> n = <span class="built_in">FPDF_GetPageCount</span>(doc);</span><br><span class="line">FPDF_PAGE page = <span class="built_in">FPDF_LoadPage</span>(doc, n - <span class="number">1</span>);</span><br></pre></td></tr></table></figure>
+
+<p>在 <code>FPDF_GetPageCount</code> 调用返回<em>之后</em>和 <code>FPDF_LoadPage</code> 调用开始<em>之前</em>，另一个线程仍然可以修改文档（例如删除最后一页），导致 <code>n-1</code> 成为一个无效索引。</p>
+</li>
+<li><p><strong>正确的“事务”：</strong> 客户端是唯一知道操作“事务”边界的。正确的、健壮的客户端代码<em>必须</em>如下所示：</p>
+<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">my_mutex.<span class="built_in">lock</span>();</span><br><span class="line"><span class="type">int</span> n = <span class="built_in">FPDF_GetPageCount</span>(doc);</span><br><span class="line">FPDF_PAGE page = <span class="built_in">FPDF_LoadPage</span>(doc, n - <span class="number">1</span>);</span><br></pre></td></tr></table></figure></li>
+</ul>
+<p>… &#x2F;&#x2F; 渲染页面<br>FPDF_ClosePage(page);<br>my_mutex.unlock();<br>```<br>我们的 API 契约<em>强制</em>客户端采用这种正确的设计，而不是提供一种具有误导性的、虚假的“安全感”。</p>
+<h2 id="6-分阶段实施与-API-演进路线图"><a href="#6-分阶段实施与-API-演进路线图" class="headerlink" title="6. 分阶段实施与 API 演进路线图"></a>6. 分阶段实施与 API 演进路线图</h2><p>如此大规模的架构更改必须分阶段进行，以保持向后兼容性，并为客户端提供清晰的迁移路径。</p>
+<h3 id="6-1-阶段一：内部重构（”大爆炸”式改造）"><a href="#6-1-阶段一：内部重构（”大爆炸”式改造）" class="headerlink" title="6.1. 阶段一：内部重构（”大爆炸”式改造）"></a>6.1. 阶段一：内部重构（”大爆炸”式改造）</h3><p><strong>目标：</strong> 在<em>不</em>修改任何 <code>public/</code> 目录下的头文件 [36] 的前提下，重构所有内部代码以使用新的 <code>PDFiumContext</code> 模式。</p>
+<p><strong>实施方案：</strong></p>
+<ol>
+<li>执行第 3 节和第 4 节中描述的所有内部重构。</li>
+<li><strong>创建“遗留 API 垫片 (Legacy Shim)”：</strong> 在 <code>fpdf_view.cpp</code> [37] 中，创建一个<em>单一的、静态的、全局的</em> <code>PDFiumContext* g_legacy_context;</code>。</li>
+<li>此 <code>g_legacy_context</code> 必须使用 <code>std::call_once</code> [2] 或等效的线程安全机制进行“惰性初始化”。</li>
+<li>创建一个<em>新的</em>全局锁：<code>static base::Lock g_legacy_api_mutex;</code>。</li>
+<li><strong>重写旧 API：</strong><ul>
+<li><code>FPDF_InitLibrary()</code> [1] 的新实现是：调用 <code>std::call_once</code> 来初始化 <code>g_legacy_context</code>。</li>
+<li><code>FPDF_DestroyLibrary()</code> [11] 的新实现是：调用 <code>std::call_once</code> 来销毁 <code>g_legacy_context</code>（或者在进程退出时依赖操作系统清理）。</li>
+<li><code>FPDF_LoadDocument()</code> [38] 的新实现是：<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="function">base::AutoLock <span class="title">lock</span><span class="params">(g_legacy_api_mutex)</span></span>;</span><br><span class="line"><span class="keyword">return</span> <span class="built_in">FPDF_LoadDocumentWithContext</span>(g_legacy_context,...);</span><br></pre></td></tr></table></figure></li>
+<li>所有其他旧的 API（如 <code>FPDF_RenderPage</code> [1]）都必须以 <code>base::AutoLock lock(g_legacy_api_mutex);</code> 开始。</li>
+</ul>
+</li>
+</ol>
+<p><strong>结果：</strong> 内部代码库已完全重构。旧的 API 仍然可以编译和运行（保持 ABI&#x2F;API 兼容性），但现在它的所有操作都被 <code>g_legacy_api_mutex</code> 完全<em>串行化</em>了。这为不迁移的客户端提供了正确性（无数据竞争），但代价是巨大的性能惩罚，从而强烈激励他们迁移到新 API。</p>
+<h3 id="6-2-阶段二：引入新的公共-API"><a href="#6-2-阶段二：引入新的公共-API" class="headerlink" title="6.2. 阶段二：引入新的公共 API"></a>6.2. 阶段二：引入新的公共 API</h3><p><strong>目标：</strong> 引入新的、高性能的、线程安全的 API。这是C API演进的标准实践 [39, 40, 41]。</p>
+<p><strong>实施方案：</strong> 在 <code>public/fpdfview.h</code> [6, 36] 等头文件中添加新函数：</p>
+<figure class="highlight c"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// 新的上下文配置结构体 (用于传入分配器、V8 Isolate [6] 等)</span></span><br><span class="line"><span class="keyword">typedef</span> <span class="class"><span class="keyword">struct</span> &#123;</span>... &#125; FPDF_CONTEXT_CONFIG;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 创建和销毁上下文</span></span><br><span class="line">FPDF_EXPORT FPDF_CONTEXT FPDF_CALLCONV <span class="title function_">FPDF_CreateContext</span><span class="params">(FPDF_CONTEXT_CONFIG* config)</span>;</span><br><span class="line">FPDF_EXPORT <span class="type">void</span> FPDF_CALLCONV <span class="title function_">FPDF_DestroyContext</span><span class="params">(FPDF_CONTEXT context)</span>;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 使用上下文加载文档</span></span><br><span class="line">FPDF_EXPORT FPDF_DOCUMENT FPDF_CALLCONV <span class="title function_">FPDF_LoadDocumentWithContext</span><span class="params">(</span></span><br><span class="line"><span class="params">    FPDF_CONTEXT context,</span></span><br><span class="line"><span class="params">    FPDF_FILEACCESS* pFileAccess,</span></span><br><span class="line"><span class="params">    FPDF_BYTESTRING password)</span>;</span><br><span class="line"></span><br><span class="line"><span class="comment">//... (以及 FPDF_LoadMemDocumentWithContext 等变体)</span></span><br></pre></td></tr></table></figure>
+
+<p><strong>关键 API 设计：</strong> 只有 <code>LoadDocument</code> 及其变体需要显式接收 <code>FPDF_CONTEXT</code>。<code>CPDF_Document</code> 实例将存储该上下文指针。所有后续操作（如 <code>FPDF_LoadPage</code>、<code>FPDF_RenderPageBitmap</code> [42]）的签名<em>保持不变</em>。它们的内部实现将通过传入的 <code>FPDF_PAGE</code> 或 <code>FPDF_DOCUMENT</code> 句柄，间接获取所需的上下文（如 3.3 节所述）。这极大地简化了 API 的演进。</p>
+<h3 id="6-3-阶段三：废弃与迁移"><a href="#6-3-阶段三：废弃与迁移" class="headerlink" title="6.3. 阶段三：废弃与迁移"></a>6.3. 阶段三：废弃与迁移</h3><ol>
+<li>在头文件中将所有旧的、不带上下文的 API 函数（如 <code>FPDF_InitLibrary</code>）标记为 <code>@deprecated</code>。</li>
+<li>发布详细的迁移指南 [43]，解释新的线程安全模型（1.3节）、新的 API（6.2节）以及不迁移的性能后果（<code>g_legacy_api_mutex</code> 串行化）。</li>
+</ol>
+<h3 id="6-4-API-演进对比"><a href="#6-4-API-演进对比" class="headerlink" title="6.4. API 演进对比"></a>6.4. API 演进对比</h3><p><strong>表 3：API 演进：遗留 vs. 线程安全</strong></p>
+<table>
+<thead>
+<tr>
+<th>遗留函数 (fpdfview.h)</th>
+<th>新的线程安全等价物</th>
+<th>遗留函数的（重构后）实现</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>FPDF_InitLibrary()</code> [1]</td>
+<td><code>FPDF_CONTEXT ctx = FPDF_CreateContext(config);</code></td>
+<td><code>std::call_once(InitGlobalLegacyContext);</code></td>
+</tr>
+<tr>
+<td><code>FPDF_DestroyLibrary()</code> [11]</td>
+<td><code>FPDF_DestroyContext(ctx);</code></td>
+<td>（依赖 <code>g_legacy_context</code> 的析构）</td>
+</tr>
+<tr>
+<td><code>FPDF_LoadDocument(...)</code> [6, 38]</td>
+<td><code>FPDF_LoadDocumentWithContext(ctx,...)</code></td>
+<td><code>base::AutoLock(g_legacy_api_mutex);</code><br><code>return FPDF_LoadDocumentWithContext(g_legacy_context,...);</code></td>
+</tr>
+<tr>
+<td><code>FPDF_RenderPageBitmap(...)</code> [42]</td>
+<td><code>FPDF_RenderPageBitmap(...)</code> (签名不变)</td>
+<td><code>base::AutoLock(g_legacy_api_mutex);</code><br><code>// (内部实现从 FPDF_PAGE 获取上下文)</code></td>
+</tr>
+<tr>
+<td><em>所有其他 API</em></td>
+<td>(签名不变)</td>
+<td><code>base::AutoLock(g_legacy_api_mutex);</code><br><code>// (内部实现从句柄获取上下文)</code></td>
+</tr>
+</tbody></table>
+<h2 id="7-验证策略：TSan-驱动的并发测试"><a href="#7-验证策略：TSan-驱动的并发测试" class="headerlink" title="7. 验证策略：TSan 驱动的并发测试"></a>7. 验证策略：TSan 驱动的并发测试</h2><p>并发错误是出了名的难以检测和复现 [44]。没有严格的验证策略，此方案将毫无价值。</p>
+<h3 id="7-1-核心工具：ThreadSanitizer-TSan"><a href="#7-1-核心工具：ThreadSanitizer-TSan" class="headerlink" title="7.1. 核心工具：ThreadSanitizer (TSan)"></a>7.1. 核心工具：ThreadSanitizer (TSan)</h3><p>我们的主要验证工具<em>必须</em>是 ThreadSanitizer (TSan) [45, 46]。</p>
+<ul>
+<li>TSan 是一种动态分析工具，它能在运行时检测<em>实际发生</em>的数据竞争 [44, 47]。</li>
+<li>所有 PDFium 测试套件必须在 CI（持续集成）上使用 <code>-fsanitize=thread</code> [46] 进行编译和运行。这是现代多线程系统开发的标准做法 [48]。</li>
+</ul>
+<h3 id="7-2-构建新的多线程压力测试套件"><a href="#7-2-构建新的多线程压力测试套件" class="headerlink" title="7.2. 构建新的多线程压力测试套件"></a>7.2. 构建新的多线程压力测试套件</h3><p>PDFium 的现有测试可能主要是单线程的。我们必须创建一套新的、专门用于<em>触发</em>并发问题的多线程压力测试 [48, 49, 50]。此套件将<em>仅</em>使用第 6.2 节中的新 API。</p>
+<ul>
+<li><p><strong>测试 1：“上下文流失” (Context Churn):</strong></p>
+<ul>
+<li><strong>目的：</strong> 测试 <code>FPDF_CreateContext</code> &#x2F; <code>FPDF_DestroyContext</code> 的数据竞争。</li>
+<li><strong>方法：</strong> 启动 50 个线程。每个线程在循环中创建和销毁 <code>FPDF_CONTEXT</code> 100 次。</li>
+<li><strong>预期：</strong> TSan 报告为零。</li>
+</ul>
+</li>
+<li><p><strong>测试 2：“共享上下文，不同文档” (黄金路径):</strong></p>
+<ul>
+<li><strong>目的：</strong> 验证我们的核心目标（1.2节）。严格测试共享资源（如 <code>CFX_FontCache</code> [10]）的内部锁。</li>
+<li><strong>方法：</strong> 创建<em>一个</em> <code>FPDF_CONTEXT</code>。启动 50 个线程。每个线程在循环中从语料库中随机选择一个 PDF，使用<em>共享的上下文</em>调用 <code>FPDF_LoadDocumentWithContext</code>，加载并渲染一个随机页面，然后关闭文档。</li>
+<li><strong>预期：</strong> TSan 报告为零。<code>CFX_FontCache</code> 中任何遗漏的 <code>base::Lock</code> 都会在这里立即暴露。</li>
+</ul>
+</li>
+<li><p><strong>测试 3：“客户端锁（负面测试）”:</strong></p>
+<ul>
+<li><strong>目的：</strong> 验证我们的 API 契约（1.3节）——即客户端<em>必须</em>加锁。</li>
+<li><strong>方法：</strong> 创建一个上下文并加载<em>一个</em> <code>FPDF_DOCUMENT</code>。启动 10 个线程。所有线程<em>同时</em>对这<em>同一个</em>文档句柄调用 <code>FPDF_RenderPageBitmap</code>，<em>不</em>使用任何外部锁。</li>
+<li><strong>预期：</strong> 此测试<em>必须</em>失败——无论是崩溃、ASan 报告 [13]、TSan 报告，还是产生损坏的图像。这证明了我们的 API 契约是必要的。</li>
+</ul>
+</li>
+<li><p><strong>测试 4：“客户端锁（正面测试）”:</strong></p>
+<ul>
+<li><strong>目的：</strong> 证明我们的客户端锁模型（1.3节）是可行且正确的。</li>
+<li><strong>方法：</strong> 与测试 3 相同，但测试工具在所有 10 个线程的 <code>FPDF_RenderPageBitmap</code> 调用外围包裹一个 <code>std::mutex</code>。</li>
+<li><strong>预期：</strong> 测试必须 cleanly 通过，TSan 报告为零。</li>
+</ul>
+</li>
+</ul>
+<h3 id="7-3-CI-集成与质量门禁"><a href="#7-3-CI-集成与质量门禁" class="headerlink" title="7.3. CI 集成与质量门禁"></a>7.3. CI 集成与质量门禁</h3><ul>
+<li>所有 TSan 启用的构建和测试必须在 CI 中运行。</li>
+<li>来自 TSan [44] 的<em>任何</em>数据竞争报告都必须自动导致构建失败。<strong>零容忍。</strong></li>
+</ul>
+<h2 id="8-结论与核心技术建议"><a href="#8-结论与核心技术建议" class="headerlink" title="8. 结论与核心技术建议"></a>8. 结论与核心技术建议</h2><p>此方案提出了一个将 PDFium 从进程级非线程安全转变为健壮的、每实例线程安全的库的完整路线图。该计划的核心是放弃 <code>thread_local</code> 等捷径，转而采用更健壮但更复杂的“上下文对象”模式。</p>
+<p>成功的关键在于严格执行以下技术建议：</p>
+<ol>
+<li><strong>全局状态：</strong> 必须彻底消除所有可变全局状态。<code>CFX_GEModule</code> [9] 单例是首要目标。</li>
+<li><strong>API 演进：</strong> 必须采用“上下文对象”模式 [20, 40]。引入 <code>FPDF_CreateContext</code> 和 <code>FPDF_LoadDocumentWithContext</code> [40, 41]。旧 API 必须降级为使用全局锁的“遗留垫片”，以激励迁移。</li>
+<li><strong>第三方依赖：</strong> 必须通过 <code>FPDF_CONTEXT</code> 传递 <code>cmsContext</code> [27] 来修复 <code>lcms2</code>。必须接受 <code>openjpeg</code> [33] 带来的性能瓶颈，并对其<em>所有</em>调用进行全局串行化。</li>
+<li><strong>锁模型：</strong> 必须采用双重锁策略：对上下文拥有的<em>共享</em>资源（<code>CFX_FontCache</code> [10]）使用内部细粒度锁 [24]，同时<em>明确要求</em>客户端对<em>独占</em>资源（<code>FPDF_DOCUMENT</code>）进行外部锁定。</li>
+<li><strong>验证：</strong> 必须将 TSan [45, 46] 作为质量门禁，并构建一个全新的、专门设计用于触发并发问题的多线程压力测试套件 [48]。</li>
+</ol>
+<h2 id="Works-cited"><a href="#Works-cited" class="headerlink" title="Works cited"></a>Works cited</h2><ol>
+<li>public&#x2F;fpdfview.h - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/main/public/fpdfview.h">https://pdfium.googlesource.com/pdfium/+/main/public/fpdfview.h</a></li>
+<li>PDFium initialization conflict across isolates · Issue #474 · espresso3389&#x2F;pdfrx - GitHub, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://github.com/espresso3389/pdfrx/issues/474">https://github.com/espresso3389/pdfrx/issues/474</a></li>
+<li>CS 111 – Spring 2005, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://read.seas.harvard.edu/~kohler/class/cs111-s05/notes/notes8.html">https://read.seas.harvard.edu/~kohler/class/cs111-s05/notes/notes8.html</a></li>
+<li>Performance Impact of Memory Ordering in Concurrent C++ - ULB : Dok - Universität Innsbruck, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://ulb-dok.uibk.ac.at/download/pdf/10046094.pdf">https://ulb-dok.uibk.ac.at/download/pdf/10046094.pdf</a></li>
+<li>PDFium thread safety - Google Groups, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://groups.google.com/g/pdfium/c/HeZSsM_KEUk">https://groups.google.com/g/pdfium/c/HeZSsM_KEUk</a></li>
+<li>Getting Started with PDFium, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/HEAD/docs/getting-started.md">https://pdfium.googlesource.com/pdfium/+/HEAD/docs/getting-started.md</a></li>
+<li>pdfium - Rust - Docs.rs, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://docs.rs/pdfium">https://docs.rs/pdfium</a></li>
+<li>lifetime problems with self-referential struct · Issue #44 · ajrcarey&#x2F;pdfium-render - GitHub, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://github.com/ajrcarey/pdfium-render/issues/44">https://github.com/ajrcarey/pdfium-render/issues/44</a></li>
+<li>core&#x2F;fxge&#x2F;cfx_gemodule.cpp - pdfium.git - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium.git/+/refs/heads/chromium/4182/core/fxge/cfx_gemodule.cpp">https://pdfium.googlesource.com/pdfium.git/+/refs/heads/chromium/4182/core/fxge/cfx_gemodule.cpp</a></li>
+<li>core&#x2F;fxge&#x2F;cfx_gemodule.h - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/6173/core/fxge/cfx_gemodule.h">https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/6173/core/fxge/cfx_gemodule.h</a></li>
+<li>PDFium thread safety - Google Groups, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://groups.google.com/d/msgid/pdfium/40a6eb27-5318-4bee-afd6-b25531931c1d%40googlegroups.com">https://groups.google.com/d/msgid/pdfium/40a6eb27-5318-4bee-afd6-b25531931c1d%40googlegroups.com</a></li>
+<li>core&#x2F;fpdfapi&#x2F;page&#x2F;cpdf_streamparser.cpp - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/2964/core/fpdfapi/page/cpdf_streamparser.cpp">https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/2964/core/fpdfapi/page/cpdf_streamparser.cpp</a></li>
+<li>Pdfium Out-Of-Bounds Read in CPDF_DIB::LoadJpxBitmap [345518608] - Chromium Issue, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://issues.chromium.org/issues/345518608">https://issues.chromium.org/issues/345518608</a></li>
+<li>fpdfsdk&#x2F;fpdf_editpage.cpp - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/main/fpdfsdk/fpdf_editpage.cpp">https://pdfium.googlesource.com/pdfium/+/refs/heads/main/fpdfsdk/fpdf_editpage.cpp</a></li>
+<li>platform&#x2F;external&#x2F;pdfium - Git at Google - Android GoogleSource, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://android.googlesource.com/platform/external/pdfium/+/03925281cf25fec70318bf2225356d022b12b566">https://android.googlesource.com/platform/external/pdfium/+/03925281cf25fec70318bf2225356d022b12b566</a></li>
+<li>core&#x2F;fpdfdoc&#x2F;cpdf_formfield.cpp - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/main/core/fpdfdoc/cpdf_formfield.cpp">https://pdfium.googlesource.com/pdfium/+/refs/heads/main/core/fpdfdoc/cpdf_formfield.cpp</a></li>
+<li>Diff - bc260fd7e338f266d4e41e979c57c100ae9661b6^1..bc260fd7e338f266d4e41e979c57c100ae9661b6 - platform&#x2F;external&#x2F;pdfium - Git at Google - Android GoogleSource, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://android.googlesource.com/platform/external/pdfium/+/bc260fd7e338f266d4e41e979c57c100ae9661b6%5E1..bc260fd7e338f266d4e41e979c57c100ae9661b6/">https://android.googlesource.com/platform/external/pdfium/+/bc260fd7e338f266d4e41e979c57c100ae9661b6%5E1..bc260fd7e338f266d4e41e979c57c100ae9661b6/</a></li>
+<li>Are function static variables thread-safe in GCC? - Stack Overflow, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://stackoverflow.com/questions/1270927/are-function-static-variables-thread-safe-in-gcc">https://stackoverflow.com/questions/1270927/are-function-static-variables-thread-safe-in-gcc</a></li>
+<li>Making global static variables multithread safe - Stack Overflow, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://stackoverflow.com/questions/2662575/making-global-static-variables-multithread-safe">https://stackoverflow.com/questions/2662575/making-global-static-variables-multithread-safe</a></li>
+<li>Google C++ Style Guide for Drake - MIT, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://drake.mit.edu/styleguide/cppguide.html">https://drake.mit.edu/styleguide/cppguide.html</a></li>
+<li>C++ Development – Basics, Guidelines and Best Practices - For the love of challenges, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://lionadi.wordpress.com/kiss-software-development-guide/programming-languages/c-development-basics-guidelines-and-best-practices/">https://lionadi.wordpress.com/kiss-software-development-guide/programming-languages/c-development-basics-guidelines-and-best-practices/</a></li>
+<li>Non-Send Futures When? - matklad, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://matklad.github.io/2023/12/10/nsfw.html">https://matklad.github.io/2023/12/10/nsfw.html</a></li>
+<li>core&#x2F;fpdfapi&#x2F;parser&#x2F;cpdf_document.cpp - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/main/core/fpdfapi/parser/cpdf_document.cpp">https://pdfium.googlesource.com/pdfium/+/refs/heads/main/core/fpdfapi/parser/cpdf_document.cpp</a></li>
+<li>cef_base.h, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://magpcss.org/ceforum/apidocs3/projects/(default)/cef_base.h.html">https://magpcss.org/ceforum/apidocs3/projects/(default)/cef_base.h.html</a></li>
+<li>core&#x2F;fpdfapi&#x2F;page&#x2F;cpdf_page.h - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/main/core/fpdfapi/page/cpdf_page.h">https://pdfium.googlesource.com/pdfium/+/refs/heads/main/core/fpdfapi/page/cpdf_page.h</a></li>
+<li>pypdfium2-team&#x2F;pypdfium2: Python bindings to PDFium, reasonably cross-platform. - GitHub, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://github.com/pypdfium2-team/pypdfium2">https://github.com/pypdfium2-team/pypdfium2</a></li>
+<li>lcms2.h - PDFium, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/5110c4743751145c4ae1934cd1d83bc6c55bb43f/core/src/fxcodec/lcms2/lcms2-2.6/include/lcms2.h">https://pdfium.googlesource.com/pdfium/+/5110c4743751145c4ae1934cd1d83bc6c55bb43f/core/src/fxcodec/lcms2/lcms2-2.6/include/lcms2.h</a></li>
+<li>Transform in lcms2 - Rust - Docs.rs, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://docs.rs/lcms2/latest/lcms2/struct.Transform.html">https://docs.rs/lcms2/latest/lcms2/struct.Transform.html</a></li>
+<li>lcms2 - Rust - Docs.rs, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://docs.rs/lcms2">https://docs.rs/lcms2</a></li>
+<li>Re: [Libjpeg-turbo-users] Is the TurboJPEG API thread-safe? - SourceForge, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://sourceforge.net/p/libjpeg-turbo/mailman/message/30336128/">https://sourceforge.net/p/libjpeg-turbo/mailman/message/30336128/</a></li>
+<li>It is not possible to safely use libjpeg-turbo in multithreaded application through the turbo API #396 - GitHub, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://github.com/libjpeg-turbo/libjpeg-turbo/issues/396">https://github.com/libjpeg-turbo/libjpeg-turbo/issues/396</a></li>
+<li>Documentation &#x2F; Official Binaries - libjpeg-turbo, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://libjpeg-turbo.org/Documentation/OfficialBinaries">https://libjpeg-turbo.org/Documentation/OfficialBinaries</a></li>
+<li>Thread Safety, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://galfar.vevb.net/imaging/smf/index.php?topic=840.0">https://galfar.vevb.net/imaging/smf/index.php?topic=840.0</a></li>
+<li>Implementing a flexible network stack - DTU Informatics, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://www2.imm.dtu.dk/pubdb/edoc/imm6627.pdf">https://www2.imm.dtu.dk/pubdb/edoc/imm6627.pdf</a></li>
+<li>public&#x2F;fpdf_edit.h - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/main/public/fpdf_edit.h">https://pdfium.googlesource.com/pdfium/+/refs/heads/main/public/fpdf_edit.h</a></li>
+<li>public&#x2F;fpdfview.h - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/4016/public/fpdfview.h">https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/4016/public/fpdfview.h</a></li>
+<li>fpdfsdk&#x2F;fpdf_view.cpp - pdfium - Git at Google, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/4542/fpdfsdk/fpdf_view.cpp">https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/4542/fpdfsdk/fpdf_view.cpp</a></li>
+<li>ajrcarey&#x2F;pdfium-render: A high-level idiomatic Rust wrapper around Pdfium, the C++ PDF library used by the Google Chromium project. - GitHub, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://github.com/ajrcarey/pdfium-render">https://github.com/ajrcarey/pdfium-render</a></li>
+<li>Standard Co-Emulation Modeling Interface (SCE-MI) Reference Manual Version 2.2 January 20 - Accellera Systems Initiative, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://www.accellera.org/images/downloads/standards/sce-mi/SCE-MI_v22-140120-final.pdf">https://www.accellera.org/images/downloads/standards/sce-mi/SCE-MI_v22-140120-final.pdf</a></li>
+<li>4.4. Using CVODE for IVP Solution - SUNDIALS documentation - Read the Docs, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://sundials.readthedocs.io/en/v6.1.1/cvode/Usage/">https://sundials.readthedocs.io/en/v6.1.1/cvode/Usage/</a></li>
+<li>Pro*C&#x2F;C++ - Developer’s Guide - Oracle Help Center, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://docs.oracle.com/en/database/oracle/oracle-database/23/lnpcc/c-c-developers-guide.pdf">https://docs.oracle.com/en/database/oracle/oracle-database/23/lnpcc/c-c-developers-guide.pdf</a></li>
+<li>fpdfview.h - Android Code Search, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://cs.android.com/android/platform/superproject/+/master:external/pdfium/public/fpdfview.h;l=710-711;drc=master;bpv=1;bpt=1">https://cs.android.com/android/platform/superproject/+/master:external/pdfium/public/fpdfview.h;l=710-711;drc=master;bpv=1;bpt=1</a></li>
+<li>API Backwards Compatibility Best Practices | Zuplo Learning Center, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://zuplo.com/learning-center/api-versioning-backward-compatibility-best-practices">https://zuplo.com/learning-center/api-versioning-backward-compatibility-best-practices</a></li>
+<li>ThreadSanitizer: data race detection in practice - Google Research, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://research.google.com/pubs/archive/35604.pdf">https://research.google.com/pubs/archive/35604.pdf</a></li>
+<li>Debugging Race Conditions in C++ &amp; C Programming with ThreadSanitizer (TSan), accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://www.youtube.com/watch?v=SiI3-pJ6MMU">https://www.youtube.com/watch?v=SiI3-pJ6MMU</a></li>
+<li>ThreadSanitizer — Clang 22.0.0git documentation - LLVM, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://clang.llvm.org/docs/ThreadSanitizer.html">https://clang.llvm.org/docs/ThreadSanitizer.html</a></li>
+<li>ThreadSanitizerCppManual · google&#x2F;sanitizers Wiki - GitHub, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://github.com/google/sanitizers/wiki/threadsanitizercppmanual">https://github.com/google/sanitizers/wiki/threadsanitizercppmanual</a></li>
+<li>Designing a Browser to Benefit from Multi-core Silicon | Ekioh, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://www.ekioh.com/wp-content/uploads/Designing-a-Browser-to-Benefit-from-Multi-core-Silicon.pdf">https://www.ekioh.com/wp-content/uploads/Designing-a-Browser-to-Benefit-from-Multi-core-Silicon.pdf</a></li>
+<li>(PDF) DataRaceBench: a benchmark suite for systematic evaluation of data race detection tools - ResearchGate, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://www.researchgate.net/publication/320954178_DataRaceBench_a_benchmark_suite_for_systematic_evaluation_of_data_race_detection_tools">https://www.researchgate.net/publication/320954178_DataRaceBench_a_benchmark_suite_for_systematic_evaluation_of_data_race_detection_tools</a></li>
+<li>Selectively Uniform Concurrency Testing - Dylan Wolff, accessed November 4, 2025, <a target="_blank" rel="noopener" href="https://dylanjwolff.com/assets/surw.pdf">https://dylanjwolff.com/assets/surw.pdf</a></li>
+</ol>
+
+      
+    </div>
+
+    
+    
+    
+      <footer class="post-footer">
+        <div class="post-eof"></div>
+      </footer>
+  </article>
+  
+  
+  
+
+      
+  
+  
+  <article itemscope itemtype="http://schema.org/Article" class="post-block" lang="en">
     <link itemprop="mainEntityOfPage" href="https://0xzone.github.io/2025/11/08/PDFium%E6%BA%90%E7%A0%81%E6%9E%B6%E6%9E%84%E6%B7%B1%E5%BA%A6%E5%88%86%E6%9E%90/">
 
     <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
@@ -900,7 +1353,7 @@
       <div class="site-state-item site-state-posts">
           <a href="/archives/">
         
-          <span class="site-state-item-count">1</span>
+          <span class="site-state-item-count">2</span>
           <span class="site-state-item-name">posts</span>
         </a>
       </div>
@@ -909,7 +1362,7 @@
         <span class="site-state-item-name">categories</span>
       </div>
       <div class="site-state-item site-state-tags">
-        <span class="site-state-item-count">2</span>
+        <span class="site-state-item-count">3</span>
         <span class="site-state-item-name">tags</span>
       </div>
   </nav>
